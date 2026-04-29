@@ -2,29 +2,40 @@ name: 微信 iOS 更新监测
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # 北京时间 10:00
+    - cron: '0 2 * * *'
   workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: 检查版本
+        id: version_check
         run: |
           RESULT=$(curl -s "https://itunes.apple.com/cn/lookup?id=414478124")
           VERSION=$(echo $RESULT | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0]['version'])")
           NOTES=$(echo $RESULT | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0].get('releaseNotes','无更新说明'))")
+          
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "NOTES<<EOF" >> $GITHUB_ENV
           echo "$NOTES" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
-
+          
           LAST=$(cat last_version.txt 2>/dev/null || echo "")
+          echo "上次版本: $LAST"
+          echo "当前版本: $VERSION"
+          
           if [ "$VERSION" != "$LAST" ]; then
             echo "UPDATED=true" >> $GITHUB_ENV
             echo "$VERSION" > last_version.txt
+            echo "检测到新版本，准备推送"
+          else
+            echo "版本未变化，跳过"
           fi
 
       - name: 提交版本记录
@@ -33,7 +44,7 @@ jobs:
           git config user.email "bot@github.com"
           git config user.name "bot"
           git add last_version.txt
-          git commit -m "微信 iOS 更新至 ${{ env.NEW_VERSION }}"
+          git commit -m "微信 iOS 更新至 ${{ env.VERSION }}"
           git push
 
       - name: Telegram 推送
