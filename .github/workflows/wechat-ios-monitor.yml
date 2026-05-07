@@ -20,7 +20,7 @@ jobs:
           import json, urllib.request, os, sys
 
           APPS = {
-            "微信":     ("414478124", "cn"),
+            "微信":     ("414478124", "us"),
             "Surge 5":  ("1442620678", "us"),
             "Telegram": ("686449807", "us"),
           }
