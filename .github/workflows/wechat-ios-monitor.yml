@@ -1,104 +1,125 @@
-name: iOS App 更新监测
+ name: iOS App 更新监测
 
-on:
-  schedule:
-    - cron: '0 * * * *'
-  workflow_dispatch:
+  on:
+    schedule:
+      - cron: '0 * * * *'
+    workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4.2.2
+  jobs:
+    check:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4.2.2
 
-      - name: 检查版本
-        run: |
-          python3 << 'EOF'
-          import json, urllib.request, os, sys
+        - name: 检查版本
+          run: |
+            python3 << 'PYEOF'
+            import json, urllib.request, os, sys, time
 
-          APPS = {
-            "微信":     ("414478124", "us"),
-            "Surge 5":  ("1442620678", "us"),
-            "Telegram": ("686449807", "us"),
-          }
+            APPS = {
+              "微信":     ("414478124", "us"),
+              "Surge 5":  ("1442620678", "us"),
+              "Telegram": ("686449807", "us"),
+            }
 
-          try:
-            with open("versions.json") as f:
-              last_versions = json.load(f)
-          except:
-            last_versions = {}
+            def parse_ver(v):
+              parts = []
+              for p in str(v).split("."):
+                num = "".join(c for c in p if c.isdigit())
+                parts.append(int(num) if num else 0)
+              return tuple(parts)
 
-          updates = []
-          for name, (app_id, region) in APPS.items():
-            url = f"https://itunes.apple.com/{region}/lookup?id={app_id}"
             try:
-              data = json.loads(urllib.request.urlopen(url, timeout=10).read())
-              result = data["results"][0]
+              with open("versions.json") as f:
+                last_versions = json.load(f)
+            except:
+              last_versions = {}
+
+            updates = []
+            for name, (app_id, region) in APPS.items():
+              # 加时间戳参数 + no-cache 头,绕过 CDN 缓存导致的版本滞后
+              url = f"https://itunes.apple.com/{region}/lookup?id={app_id}&_t={int(time.time())}"
+              try:
+                req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+                data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+                result = data["results"][0]
+              except Exception as e:
+                print(f"[警告] 获取 {name} 版本失败: {e}", file=sys.stderr)
+                continue
+
+              version = result["version"]
+              notes = result.get("releaseNotes", "无更新说明")
+              if len(notes) > 500:
+                notes = notes[:500] + "..."
+
+              last = last_versions.get(name, "")
+
+              # 首次记录:只存不报,避免初始化时全量推送
+              if not last:
+                last_versions[name] = version
+                continue
+
+              # 只在版本号真正变大时才提示,过滤 CDN 抖动返回的旧版本
+              if parse_ver(version) > parse_ver(last):
+                last_versions[name] = version
+                updates.append(f"📱 *{name} iOS 有新版本*\n版本号:{version}\n\n更新说明:{notes}")
+              elif parse_ver(version) < parse_ver(last):
+                # API 返回了更旧版本号(缓存抖动),忽略且不回退记录
+                print(f"[忽略] {name} API 返回旧版本 {version} < 记录 {last}", file=sys.stderr)
+
+            with open("versions.json", "w") as f:
+              json.dump(last_versions, f, ensure_ascii=False, indent=2)
+
+            if updates:
+              msg = "\n\n---\n\n".join(updates)
+              with open(os.environ["GITHUB_ENV"], "a") as f:
+                f.write("UPDATED=true\n")
+                # 用随机分隔符,防止更新说明里出现 EOF 导致 heredoc 提前截断
+                f.write("MSG<<MSG_DELIM_8f3a2c\n")
+                f.write(msg + "\n")
+                f.write("MSG_DELIM_8f3a2c\n")
+            PYEOF
+
+        - name: 提交版本记录
+          if: env.UPDATED == 'true'
+          run: |
+            git config user.email "bot@github.com"
+            git config user.name "bot"
+            git add versions.json
+            git commit -m "更新版本记录"
+            git push
+
+        - name: Telegram 推送
+          if: env.UPDATED == 'true'
+          run: |
+            python3 << 'PYEOF'
+            import urllib.request, urllib.parse, os, sys
+
+            token = os.environ["TG_BOT_TOKEN"]
+            chat_id = os.environ["TG_CHAT_ID"]
+            msg = os.environ["MSG"]
+
+            data = urllib.parse.urlencode({
+              "chat_id": chat_id,
+              "text": msg,
+              "parse_mode": "Markdown",
+            }).encode()
+
+            req = urllib.request.Request(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              data=data,
+            )
+            try:
+              resp = urllib.request.urlopen(req, timeout=10)
+              print("推送成功:", resp.read().decode())
             except Exception as e:
-              print(f"[警告] 获取 {name} 版本失败: {e}", file=sys.stderr)
-              continue
-
-            version = result["version"]
-            notes = result.get("releaseNotes", "无更新说明")
-            # 截断过长的更新说明，避免 Telegram 超限
-            if len(notes) > 500:
-              notes = notes[:500] + "..."
-
-            last = last_versions.get(name, "")
-            if version != last:
-              last_versions[name] = version
-              updates.append(f"📱 *{name} iOS 有新版本*\n版本号：{version}\n\n更新说明：{notes}")
-
-          with open("versions.json", "w") as f:
-            json.dump(last_versions, f, ensure_ascii=False, indent=2)
-
-          if updates:
-            msg = "\n\n---\n\n".join(updates)
-            with open(os.environ["GITHUB_ENV"], "a") as f:
-              f.write("UPDATED=true\n")
-              f.write(f"MSG<<EOF\n{msg}\nEOF\n")
-          EOF
-
-      - name: 提交版本记录
-        if: env.UPDATED == 'true'
-        run: |
-          git config user.email "bot@github.com"
-          git config user.name "bot"
-          git add versions.json
-          git commit -m "更新版本记录"
-          git push
-
-      - name: Telegram 推送
-        if: env.UPDATED == 'true'
-        run: |
-          python3 << 'EOF'
-          import urllib.request, urllib.parse, os, sys
-
-          token = os.environ["TG_BOT_TOKEN"]
-          chat_id = os.environ["TG_CHAT_ID"]
-          msg = os.environ["MSG"]
-
-          data = urllib.parse.urlencode({
-            "chat_id": chat_id,
-            "text": msg,
-            "parse_mode": "Markdown",
-          }).encode()
-
-          req = urllib.request.Request(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data=data,
-          )
-          try:
-            resp = urllib.request.urlopen(req, timeout=10)
-            print("推送成功:", resp.read().decode())
-          except Exception as e:
-            print(f"推送失败: {e}", file=sys.stderr)
-            sys.exit(1)
-          EOF
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          MSG: ${{ env.MSG }}
+              print(f"推送失败: {e}", file=sys.stderr)
+              sys.exit(1)
+            PYEOF
+          env:
+            TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+            TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+            MSG: ${{ env.MSG }}
